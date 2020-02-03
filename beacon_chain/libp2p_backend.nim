@@ -1,7 +1,7 @@
 import
   algorithm, typetraits, net,
   stew/[varints,base58], stew/shims/[macros, tables], chronos, chronicles,
-  stint, faststreams/output_stream, serialization,
+  stint, faststreams/output_stream, serialization, peer_pool,
   json_serialization/std/options, eth/p2p/p2p_protocol_dsl,
   eth/p2p/discoveryv5/enr,
   # TODO: create simpler to use libp2p modules that use re-exports
@@ -28,6 +28,7 @@ type
     switch*: Switch
     discovery*: Eth2DiscoveryProtocol
     wantedPeers*: int
+    peerpool*: PeerPool[PeerID, Peer]
     peers*: Table[PeerID, Peer]
     peersByDiscoveryId*: Table[Eth2DiscoveryId, Peer]
     protocolStates*: seq[RootRef]
@@ -43,6 +44,8 @@ type
     connectionState*: ConnectionState
     protocolStates*: seq[RootRef]
     maxInactivityAllowed*: Duration
+    future: Future[void]
+    score*: int
 
   ConnectionState* = enum
     None,
@@ -141,6 +144,39 @@ proc disconnect*(peer: Peer, reason: DisconnectionReason, notifyOtherPeer = fals
     await peer.network.switch.disconnect(peer.info)
     peer.connectionState = Disconnected
     peer.network.peers.del(peer.info.peerId)
+    peer.future.complete()
+
+proc getFuture*(peer: Peer): Future[void] {.inline.} =
+  ## Returns ``peer`` lifetime Future[void].
+  ## Note: This procedure is used by PeerPool.
+  result = peer.future
+
+proc getKey*(peer: Peer): PeerID {.inline.} =
+  ## Returns ``peer`` ident.
+  ## Note: This procedure is used by PeerPool.
+  result = peer.info.peerId
+
+proc `<`*(peera, peerb: Peer): bool {.inline.} =
+  ## Comparing peers by comparing their weights/scores.
+  ## Note: This procedure is used by PeerPool.
+  result = (peera.score < peerb.score)
+
+proc join*(peer: Peer): Future[void] =
+  ## This procedure returns Future[void] which completes only, when
+  ## ``peer`` is disconnected.
+  var retFuture = newFuture[void]()
+  proc continuation(udata: pointer) {.gcsafe.} =
+    if not(retFuture.finished()):
+      retFuture.complete()
+  proc cancellation(udata: pointer) {.gcsafe.} =
+    peer.future.removeCallback(continuation)
+
+  if peer.future.finished:
+    retFuture.complete()
+  else:
+    peer.future.addCallback(continuation)
+    retFuture.cancelCallback = cancellation
+  return retFuture
 
 proc safeClose(stream: P2PStream) {.async.} =
   if not stream.closed:
@@ -203,6 +239,7 @@ proc init*(T: type Eth2Node, conf: BeaconNodeConf,
   result.peers = initTable[PeerID, Peer]()
   result.discovery = Eth2DiscoveryProtocol.new(conf, privKey.getBytes)
   result.wantedPeers = conf.maxPeers
+  result.peerpool = newPeerPool[PeerID, Peer](maxPeers = conf.maxPeers)
 
   newSeq result.protocolStates, allProtocols.len
   for proto in allProtocols:
@@ -232,6 +269,7 @@ proc init*(T: type Peer, network: Eth2Node, info: PeerInfo): Peer =
     let proto = allProtocols[i]
     if proto.peerStateInitializer != nil:
       result.protocolStates[i] = proto.peerStateInitializer(result)
+  result.future = newFuture[void]()
 
 proc registerMsg(protocol: ProtocolInfo,
                  name: string,
@@ -349,4 +387,3 @@ proc p2pProtocolBackendImpl*(p: P2PProtocol): Backend =
 
   result.implementProtocolInit = proc (p: P2PProtocol): NimNode =
     return newCall(initProtocol, newLit(p.name), p.peerInit, p.netInit)
-

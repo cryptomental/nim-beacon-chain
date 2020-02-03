@@ -1,6 +1,6 @@
 import
   algorithm, typetraits,
-  stew/varints, stew/shims/[macros, tables], chronos, chronicles,
+  stew/varints, stew/shims/[macros, tables], chronos, chronicles, peer_pool,
   libp2p/daemon/daemonapi, faststreams/output_stream, serialization,
   json_serialization/std/options, eth/p2p/p2p_protocol_dsl,
   libp2p_json_serialization, ssz
@@ -12,6 +12,7 @@ type
   Eth2Node* = ref object of RootObj
     daemon*: DaemonAPI
     peers*: Table[PeerID, Peer]
+    peerpool*: PeerPool[PeerID, Peer]
     protocolStates*: seq[RootRef]
 
   EthereumNode = Eth2Node # needed for the definitions in p2p_backends_helpers
@@ -23,6 +24,8 @@ type
     connectionState*: ConnectionState
     protocolStates*: seq[RootRef]
     maxInactivityAllowed*: Duration
+    future: Future[void]
+    score*: int
 
   ConnectionState* = enum
     None,
@@ -113,13 +116,47 @@ proc getPeer*(node: Eth2Node, peerInfo: PeerInfo): Peer =
 proc peerFromStream(node: Eth2Node, stream: P2PStream): Peer {.gcsafe.} =
   node.getPeer(stream.peer)
 
-proc disconnect*(peer: Peer, reason: DisconnectionReason, notifyOtherPeer = false) {.async.} =
+proc disconnect*(peer: Peer, reason: DisconnectionReason,
+                 notifyOtherPeer = false) {.async.} =
   # TODO: How should we notify the other peer?
   if peer.connectionState notin {Disconnecting, Disconnected}:
     peer.connectionState = Disconnecting
     await peer.network.daemon.disconnect(peer.id)
     peer.connectionState = Disconnected
     peer.network.peers.del(peer.id)
+    peer.future.complete()
+
+proc getFuture*(peer: Peer): Future[void] {.inline.} =
+  ## Returns ``peer`` lifetime Future[void].
+  ## Note: This procedure is used by PeerPool.
+  result = peer.future
+
+proc getKey*(peer: Peer): PeerID {.inline.} =
+  ## Returns ``peer`` ident.
+  ## Note: This procedure is used by PeerPool.
+  result = peer.id
+
+proc `<`*(peera, peerb: Peer): bool {.inline.} =
+  ## Comparing peers by comparing their weights/scores.
+  ## Note: This procedure is used by PeerPool.
+  result = (peera.score < peerb.score)
+
+proc join*(peer: Peer): Future[void] =
+  ## This procedure returns ``Future[void]`` which completes only, when
+  ## ``peer`` is disconnected.
+  var retFuture = newFuture[void]()
+  proc continuation(udata: pointer) {.gcsafe.} =
+    if not(retFuture.finished()):
+      retFuture.complete()
+  proc cancellation(udata: pointer) {.gcsafe.} =
+    peer.future.removeCallback(continuation)
+
+  if peer.future.finished:
+    retFuture.complete()
+  else:
+    peer.future.addCallback(continuation)
+    retFuture.cancelCallback = cancellation
+  return retFuture
 
 proc safeClose(stream: P2PStream) {.async.} =
   if P2PStreamFlags.Closed notin stream.flags:
@@ -134,6 +171,7 @@ proc init*(T: type Eth2Node, daemon: DaemonAPI): Future[T] {.async.} =
   result.daemon = daemon
   result.daemon.userData = result
   result.peers = initTable[PeerID, Peer]()
+  result.peerpool = newPeerPool[PeerID, Peer]()
 
   newSeq result.protocolStates, allProtocols.len
   for proto in allProtocols:
@@ -155,6 +193,7 @@ proc init*(T: type Peer, network: Eth2Node, id: PeerID): Peer =
     let proto = allProtocols[i]
     if proto.peerStateInitializer != nil:
       result.protocolStates[i] = proto.peerStateInitializer(result)
+  result.future = newFuture[void]()
 
 proc registerMsg(protocol: ProtocolInfo,
                  name: string,
@@ -255,4 +294,3 @@ proc p2pProtocolBackendImpl*(p: P2PProtocol): Backend =
 
   result.implementProtocolInit = proc (p: P2PProtocol): NimNode =
     return newCall(initProtocol, newLit(p.name), p.peerInit, p.netInit)
-
