@@ -51,7 +51,7 @@ iterator nodes: Node =
   for i in 0 ..< serverCount:
     let
       serverShortName = if i == 0: "master-01" else: &"node-0{i}"
-      server = &"{serverShortName}.do-ams3.nimbus.test.statusim.net"
+      server = &"{serverShortName}.aws-eu-central-1a.nimbus.test.statusim.net"
 
     for j in 0 ..< instancesCount:
       yield Node(id: i*instancesCount + j,
@@ -98,7 +98,12 @@ iterator validatorAssignments: tuple[node: Node; firstValidator, lastValidator: 
 case conf.cmd
 of restart_nodes:
   for n in nodes():
-    echo &"ssh {n.server} docker restart {n.container}"
+    if n.id mod 2 == 0:
+      # This will only print one line: "docker.io/statusteam/nimbus_beacon_node:testnet1".
+      echo &"ssh {n.server} docker pull -q statusteam/nimbus_beacon_node:{conf.network}"
+    # docker-compose will rebuild the container if it detects a newer image.
+    # Prints: "Recreating beacon-node-testnet1-1 ... done".
+    echo &"ssh {n.server} 'cd /docker/{n.container} && docker-compose up -d'"
 
 of reset_network:
   for n, firstValidator, lastValidator in validatorAssignments():
@@ -114,8 +119,9 @@ of reset_network:
     let dockerPath = &"/docker/{n.container}/data/BeaconNode"
     echo &"echo Syncing {lastValidator - firstValidator} keys starting from {firstValidator} to container {n.container}@{n.server} ... && \\"
     echo &"  ssh {n.server} 'sudo rm -rf /tmp/nimbus && mkdir -p /tmp/nimbus/' && \\"
-    echo &"  rsync {networkDataFiles} {n.server}:/tmp/nimbus/net-data/ && \\"
-    if keysList.len > 0: echo &"  rsync {keysList} {n.server}:/tmp/nimbus/keys/ && \\"
+    echo &"  rsync -a -zz {networkDataFiles} {n.server}:/tmp/nimbus/net-data/ && \\"
+    if keysList.len > 0:
+      echo &"  rsync -a -zz {keysList} {n.server}:/tmp/nimbus/keys/ && \\"
 
     echo &"  ssh {n.server} 'sudo docker container stop {n.container} && " &
                          &"sudo mkdir -p {dockerPath}/validators && " &

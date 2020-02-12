@@ -20,13 +20,13 @@ import
 
 const OpVoluntaryExitDir = SszTestsDir/const_preset/"phase0"/"operations"/"voluntary_exit"/"pyspec_tests"
 
-template runTest(identifier: untyped) =
+proc runTest(identifier: string) =
   # We wrap the tests in a proc to avoid running out of globals
   # in the future: Nim supports up to 3500 globals
   # but unittest with the macro/templates put everything as globals
   # https://github.com/nim-lang/Nim/issues/12084#issue-486866402
 
-  const testDir = OpVoluntaryExitDir / astToStr(identifier)
+  let testDir = OpVoluntaryExitDir / identifier
 
   proc `testImpl _ voluntary_exit _ identifier`() =
 
@@ -39,13 +39,13 @@ template runTest(identifier: untyped) =
     else:
       prefix = "[Invalid] "
 
-    test prefix & astToStr(identifier):
+    timedTest prefix & identifier:
       var stateRef, postRef: ref BeaconState
-      var voluntaryExit: ref VoluntaryExit
+      var voluntaryExit: ref SignedVoluntaryExit
       new voluntaryExit
       new stateRef
 
-      voluntaryExit[] = parseTest(testDir/"voluntary_exit.ssz", SSZ, VoluntaryExit)
+      voluntaryExit[] = parseTest(testDir/"voluntary_exit.ssz", SSZ, SignedVoluntaryExit)
       stateRef[] = parseTest(testDir/"pre.ssz", SSZ, BeaconState)
 
       if existsFile(testDir/"post.ssz"):
@@ -64,12 +64,5 @@ template runTest(identifier: untyped) =
   `testImpl _ voluntary_exit _ identifier`()
 
 suite "Official - Operations - Voluntary exit " & preset():
-  runTest(success)
-  runTest(invalid_signature)
-  runTest(success_exit_queue)
-  runTest(validator_exit_in_future)
-  runTest(validator_invalid_validator_index)
-  runTest(validator_not_active)
-  runTest(validator_already_exited)
-  runTest(validator_not_active_long_enough)
-
+  for kind, path in walkDir(OpVoluntaryExitDir, true):
+    runTest(path)

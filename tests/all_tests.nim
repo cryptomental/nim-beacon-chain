@@ -5,6 +5,8 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
+import ./testutil
+
 import # Official constants
   ./official/test_fixture_const_sanity_check
 
@@ -16,15 +18,20 @@ import # Unit test
   ./test_block_pool,
   ./test_helpers,
   ./test_interop,
+  ./test_kvstore,
+  ./test_kvstore_lmdb,
   ./test_ssz,
   ./test_state_transition,
   ./test_sync_protocol,
   # ./test_validator # Empty!
   ./test_zero_signature,
-  ./test_peer_pool
+  ./test_peer_pool,
+  ./test_sync_manager
 
 import # Refactor state transition unit tests
-  ./spec_block_processing/test_genesis,
+  # TODO re-enable when useful
+  # ./spec_block_processing/test_genesis,
+  # In mainnet these take 2 minutes and are empty TODOs
   ./spec_block_processing/test_process_deposits,
   ./spec_block_processing/test_process_attestation,
   ./spec_epoch_processing/test_process_justification_and_finalization
@@ -35,3 +42,5 @@ import # Refactor state transition unit tests
 #        # https://github.com/status-im/nim-beacon-chain/issues/374
 #   ./official/test_fixture_shuffling,
 #   ./official/test_fixture_bls
+
+summarizeLongTests()

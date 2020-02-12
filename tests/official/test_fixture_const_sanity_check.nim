@@ -20,7 +20,7 @@ const
   SpecDir = currentSourcePath.rsplit(DirSep, 1)[0] /
                   ".."/".."/"beacon_chain"/"spec"
   FixturesDir = currentSourcePath.rsplit(DirSep, 1)[0] / "fixtures"
-  Config = FixturesDir/"tests-v0.9.2"/const_preset/"config.yaml"
+  Config = FixturesDir/"tests-v0.10.1"/const_preset/"config.yaml"
 
 type
   CheckedType = SomeInteger or Slot or Epoch
@@ -108,7 +108,7 @@ proc checkConfig() =
   var config = yamlStream.loadToJson()
   doAssert config.len == 1
   for constant, value in config[0]:
-    test &"{constant:<50}{value:<20}{preset()}":
+    timedTest &"{constant:<50}{value:<20}{preset()}":
       if constant in IgnoreKeys:
         echo &"        ↶↶ Skipping {constant}"
         continue
@@ -116,8 +116,11 @@ proc checkConfig() =
         let domain = parseEnum[DomainType](constant)
         let value = parseU32LEHex(value.getStr())
         check: uint32(domain) == value
+      elif constant == "GENESIS_FORK_VERSION":
+        let value = parseU32LEHex(value.getStr())
+        check: ConstsToCheck[constant] == value
       else:
         check: ConstsToCheck[constant] == value.getBiggestInt().uint64()
 
-suite "Official - 0.9.2 - constants & config " & preset():
+suite "Official - 0.10.1 - constants & config " & preset():
   checkConfig()

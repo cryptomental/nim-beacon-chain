@@ -28,9 +28,9 @@
 	branch = master
 [submodule "vendor/NimYAML"]
 	path = vendor/NimYAML
-	url = https://github.com/flyx/NimYAML.git
+	url = https://github.com/status-im/NimYAML.git
 	ignore = dirty
-	branch = master
+	branch = devel
 [submodule "vendor/nim-web3"]
 	path = vendor/nim-web3
 	url = https://github.com/status-im/nim-web3.git
@@ -116,11 +116,6 @@
 	url = https://github.com/tormund/news.git
 	ignore = dirty
 	branch = master
-[submodule "vendor/nim-result"]
-	path = vendor/nim-result
-	url = https://github.com/arnetheduck/nim-result.git
-	ignore = dirty
-	branch = master
 [submodule "vendor/nim-prompt"]
 	path = vendor/nim-prompt
 	url = https://github.com/status-im/nim-prompt.git
@@ -136,3 +131,6 @@
 	url = https://github.com/status-im/nim-bearssl.git
 	ignore = dirty
 	branch = master
+[submodule "vendor/lmdb"]
+	path = vendor/lmdb
+	url = https://github.com/status-im/lmdb.git

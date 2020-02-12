@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018 Status Research & Development GmbH
+# Copyright (c) 2018-2020 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -9,9 +9,9 @@
 
 import
   unittest,
-  ./testutil,
+  ./testutil, ./testblockutil,
   ../beacon_chain/spec/[beaconstate, datatypes, digest, validator],
-  ../beacon_chain/[state_transition, ssz]
+  ../beacon_chain/[extras, state_transition, ssz]
 
 suite "Block processing" & preset():
   ## For now just test that we can compile and execute block processing with
@@ -22,11 +22,11 @@ suite "Block processing" & preset():
     # TODO bls verification is a bit of a bottleneck here
     genesisState = initialize_beacon_state_from_eth1(
       Eth2Digest(), 0,
-      makeInitialDeposits(), {})
+      makeInitialDeposits(), {skipMerkleValidation})
     genesisBlock = get_initial_beacon_block(genesisState)
-    genesisRoot = signing_root(genesisBlock)
+    genesisRoot = hash_tree_root(genesisBlock.message)
 
-  test "Passes from genesis state, no block" & preset():
+  timedTest "Passes from genesis state, no block" & preset():
     var
       state = genesisState
 
@@ -34,20 +34,20 @@ suite "Block processing" & preset():
     check:
       state.slot == genesisState.slot + 1
 
-  test "Passes from genesis state, empty block" & preset():
+  timedTest "Passes from genesis state, empty block" & preset():
     var
       state = genesisState
-      previous_block_root = signing_root(genesisBlock)
+      previous_block_root = hash_tree_root(genesisBlock.message)
       new_block = makeBlock(state, previous_block_root, BeaconBlockBody())
 
-    let block_ok = state_transition(state, new_block, {})
+    let block_ok = state_transition(state, new_block.message, {})
 
     check:
       block_ok
 
       state.slot == genesisState.slot + 1
 
-  test "Passes through epoch update, no block" & preset():
+  timedTest "Passes through epoch update, no block" & preset():
     var
       state = genesisState
 
@@ -56,7 +56,7 @@ suite "Block processing" & preset():
     check:
       state.slot == genesisState.slot + SLOTS_PER_EPOCH
 
-  test "Passes through epoch update, empty block" & preset():
+  timedTest "Passes through epoch update, empty block" & preset():
     var
       state = genesisState
       previous_block_root = genesisRoot
@@ -64,17 +64,17 @@ suite "Block processing" & preset():
     for i in 1..SLOTS_PER_EPOCH.int:
       var new_block = makeBlock(state, previous_block_root, BeaconBlockBody())
 
-      let block_ok = state_transition(state, new_block, {})
+      let block_ok = state_transition(state, new_block.message, {})
 
       check:
         block_ok
 
-      previous_block_root = signing_root(new_block)
+      previous_block_root = hash_tree_root(new_block.message)
 
     check:
       state.slot == genesisState.slot + SLOTS_PER_EPOCH
 
-  test "Attestation gets processed at epoch" & preset():
+  timedTest "Attestation gets processed at epoch" & preset():
     var
       state = genesisState
       previous_block_root = genesisRoot
@@ -98,7 +98,7 @@ suite "Block processing" & preset():
       new_block = makeBlock(state, previous_block_root, BeaconBlockBody(
         attestations: @[attestation]
       ))
-    discard state_transition(state, new_block, {})
+    discard state_transition(state, new_block.message, {})
 
     check:
       # TODO epoch attestations can get multiplied now; clean up paths to

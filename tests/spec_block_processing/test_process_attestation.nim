@@ -1,12 +1,12 @@
 # beacon_chain
-# Copyright (c) 2018 Status Research & Development GmbH
+# Copyright (c) 2018-2019 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
 # process_attestation (beaconstate.nim)
-# https://github.com/ethereum/eth2.0-specs/blob/v0.9.2/specs/core/0_beacon-chain.md#attestations
+# https://github.com/ethereum/eth2.0-specs/blob/v0.9.4/specs/core/0_beacon-chain.md#attestations
 # ---------------------------------------------------------------
 
 {.used.}
@@ -32,7 +32,7 @@ suite "[Unit - Spec - Block processing] Attestations " & preset():
     # The BeaconState is exposed as "state" in the calling context
     # The attestation to process must be named "attestation" in the calling context
 
-    test name:
+    timedTest name:
       var state{.inject.}: BeaconState
       deepCopy(state, genesisState)
 
@@ -72,7 +72,7 @@ suite "[Unit - Spec - Block processing] Attestations " & preset():
   # TODO check if this should be replaced
   when false:
     when MAX_EPOCHS_PER_CROSSLINK > 4'u64:
-      test "Valid attestation since max epochs per crosslinks [Skipped for preset: " & const_preset & ']':
+      timedTest "Valid attestation since max epochs per crosslinks [Skipped for preset: " & const_preset & ']':
         discard
     else:
       valid_attestation("Valid attestation since max epochs per crosslinks"):

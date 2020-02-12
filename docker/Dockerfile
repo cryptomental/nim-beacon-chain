@@ -3,7 +3,7 @@ FROM debian:bullseye-slim AS build
 SHELL ["/bin/bash", "-c"]
 
 RUN apt-get -qq update \
- && apt-get -qq -y install build-essential make wget librocksdb-dev libpcre3-dev golang-go git &>/dev/null \
+ && apt-get -qq -y install build-essential make wget libpcre3-dev golang-go git &>/dev/null \
  && apt-get -qq clean
 
 # let Docker cache this between Git revision and testnet version changes
@@ -21,12 +21,13 @@ RUN cd /root \
 # to get a fresh up-to-date version of Nim and p2pd.
 ARG GIT_REVISION
 ARG NETWORK_NIM_FLAGS
+ARG MARCH_NIM_FLAGS
 
 RUN cd /root/nim-beacon-chain \
  && git fetch \
  && git reset --hard ${GIT_REVISION} \
  && make -j$(nproc) update \
- && make LOG_LEVEL=DEBUG NIMFLAGS="-d:debug -d:insecure -d:testnet_servers_image ${NETWORK_NIM_FLAGS}" beacon_node
+ && make LOG_LEVEL=TRACE NIMFLAGS="-d:debug -d:insecure -d:testnet_servers_image ${NETWORK_NIM_FLAGS} ${MARCH_NIM_FLAGS}" beacon_node
 
 # --------------------------------- #
 # Starting new image to reduce size #
@@ -36,7 +37,7 @@ FROM debian:bullseye-slim
 SHELL ["/bin/bash", "-c"]
 
 RUN apt-get -qq update \
- && apt-get -qq -y install librocksdb-dev libpcre3 psmisc &>/dev/null \
+ && apt-get -qq -y install libpcre3 psmisc &>/dev/null \
  && apt-get -qq clean \
  && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 

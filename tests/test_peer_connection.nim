@@ -4,7 +4,7 @@ import
   ../beacon_chain/[conf, eth2_network]
 
 template asyncTest*(name, body: untyped) =
-  test name:
+  timedTest name:
     proc scenario {.async.} = body
     waitFor scenario()
 
@@ -23,9 +23,8 @@ asyncTest "connect two nodes":
 
   echo "Node 1 persistent address: ", n1PersistentAddress
 
-  when networkBackend != rlpxBackend:
-    var n1ActualAddress = await n1.daemon.identity()
-    echo "Node 1 actual address:", n1ActualAddress
+  var n1ActualAddress = await n1.daemon.identity()
+  echo "Node 1 actual address:", n1ActualAddress
 
   echo "Press any key to continue"
   discard stdin.readLine()

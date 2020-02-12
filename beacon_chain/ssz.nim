@@ -12,7 +12,7 @@ import
   endians, stew/shims/macros, options, algorithm, options,
   stew/[bitops2, bitseqs, objects, varints, ptrops, ranges/ptr_arith], stint,
   faststreams/input_stream, serialization, serialization/testing/tracing,
-  nimcrypto/sha2, blscurve, eth/common,
+  nimcrypto/sha2, blscurve,
   ./spec/[crypto, datatypes, digest],
   ./ssz/[types, bytes_reader]
 
@@ -57,7 +57,7 @@ type
 
   FixedSizedWriterCtx = object
 
-  Bytes = seq[byte]
+  ByteList = seq[byte]
 
 serializationFormat SSZ,
                     Reader = SszReader,
@@ -102,7 +102,7 @@ template toSszType*(x: auto): auto =
   when x is Slot|Epoch|ValidatorIndex|enum: uint64(x)
   elif x is Eth2Digest: x.data
   elif x is BlsValue|BlsCurveType: getBytes(x)
-  elif x is BitSeq|BitList: Bytes(x)
+  elif x is BitSeq|BitList: ByteList(x)
   elif x is ref|ptr: toSszType x[]
   elif x is Option: toSszType x.get
   elif x is TypeWithMaxLen: toSszType valueOf(x)
@@ -194,7 +194,7 @@ template writeField*(w: var SszWriter,
       let initPos = w.stream.pos
       trs "WRITING VAR SIZE VALUE OF TYPE ", name(FieldType)
       when FieldType is BitSeq:
-        trs "BIT SEQ ", Bytes(field)
+        trs "BIT SEQ ", ByteList(field)
       writeVarSizeType(w, toSszType(field))
       ctx.offset += w.stream.pos - initPos
 
@@ -269,8 +269,17 @@ template fromSszBytes*[T; N](_: type TypeWithMaxLen[T, N],
   mixin fromSszBytes
   fromSszBytes(T, bytes)
 
-proc readValue*(r: var SszReader, val: var auto) =
-  val = readSszValue(r.stream.readBytes(r.stream.endPos), val.type)
+proc readValue*[T](r: var SszReader, val: var T) =
+  const minimalSize = fixedPortionSize(T)
+  when isFixedSize(T):
+    if r.stream[].ensureBytes(minimalSize):
+      val = readSszValue(r.stream.readBytes(minimalSize), T)
+    else:
+      raise newException(MalformedSszError, "SSZ input of insufficient size")
+  else:
+    # TODO Read the fixed portion first and precisely measure the size of
+    # the dynamic portion to consume the right number of bytes.
+    val = readSszValue(r.stream.readBytes(r.stream.endPos), T)
 
 proc readValue*[T](r: var SszReader, val: var SizePrefixed[T]) =
   let length = r.stream.readVarint(uint64)
@@ -458,8 +467,8 @@ func bitlistHashTreeRoot(merkelizer: SszChunksMerkelizer, x: BitSeq): Eth2Digest
   trs "CHUNKIFYING BIT SEQ WITH LIMIT ", merkelizer.limit
 
   var
-    totalBytes = Bytes(x).len
-    lastCorrectedByte = Bytes(x)[^1]
+    totalBytes = ByteList(x).len
+    lastCorrectedByte = ByteList(x)[^1]
 
   if lastCorrectedByte == byte(1):
     if totalBytes == 1:
@@ -471,10 +480,10 @@ func bitlistHashTreeRoot(merkelizer: SszChunksMerkelizer, x: BitSeq): Eth2Digest
                            getZeroHashWithoutSideEffect(0)) # this is the mixed length
 
     totalBytes -= 1
-    lastCorrectedByte = Bytes(x)[^2]
+    lastCorrectedByte = ByteList(x)[^2]
   else:
     let markerPos = log2trunc(lastCorrectedByte)
-    lastCorrectedByte.lowerBit(markerPos)
+    lastCorrectedByte.clearBit(markerPos)
 
   var
     bytesInLastChunk = totalBytes mod bytesPerChunk
@@ -489,14 +498,14 @@ func bitlistHashTreeRoot(merkelizer: SszChunksMerkelizer, x: BitSeq): Eth2Digest
       chunkStartPos = i * bytesPerChunk
       chunkEndPos = chunkStartPos + bytesPerChunk - 1
 
-    merkelizer.addChunk Bytes(x).toOpenArray(chunkEndPos, chunkEndPos)
+    merkelizer.addChunk ByteList(x).toOpenArray(chunkEndPos, chunkEndPos)
 
   var
     lastChunk: array[bytesPerChunk, byte]
     chunkStartPos = fullChunks * bytesPerChunk
 
   for i in 0 .. bytesInLastChunk - 2:
-    lastChunk[i] = Bytes(x)[chunkStartPos + i]
+    lastChunk[i] = ByteList(x)[chunkStartPos + i]
 
   lastChunk[bytesInLastChunk - 1] = lastCorrectedByte
 
@@ -557,6 +566,8 @@ func maxChunksCount(T: type, maxLen: static int64): int64 {.compileTime.} =
 func hash_tree_root*(x: auto): Eth2Digest =
   trs "STARTING HASH TREE ROOT FOR TYPE ", name(type(x))
   mixin toSszType
+  when x is SignedBeaconBlock:
+    doassert false
   when x is TypeWithMaxLen:
     const maxLen = x.maxLen
     type T = type valueOf(x)
@@ -593,17 +604,3 @@ iterator hash_tree_roots_prefix*[T](lst: openarray[T], limit: auto):
   for i, elem in lst:
     merkelizer.addChunk(hash_tree_root(elem).data)
     yield mixInLength(merkelizer.getFinalHash(), i + 1)
-
-func lastFieldName(RecordType: type): string {.compileTime.} =
-  enumAllSerializedFields(RecordType):
-    result = fieldName
-
-func hasSigningRoot(T: type): bool {.compileTime.} =
-  lastFieldName(T) == "signature"
-
-func signingRoot*(obj: object): Eth2Digest =
-  const lastField = lastFieldName(obj.type)
-  merkelizeFields:
-    obj.enumInstanceSerializedFields(fieldName, field):
-      when fieldName != lastField:
-        addField2 field

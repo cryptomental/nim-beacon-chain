@@ -9,45 +9,22 @@
 # cryptography in the spec is in flux, with sizes and test vectors still being
 # hashed out. This layer helps isolate those chagnes.
 
-# Useful conversation about BLS signatures (TODO: condense this)
+# BLS signatures can be combined such that multiple signatures are aggregated.
+# Each time a new signature is added, the corresponding public key must be
+# added to the verification key as well - if a key signs twice, it must be added
+# twice to the verification key. Aggregated signatures can be combined
+# arbitrarily (like addition) as long as public keys are aggregated in the same
+# way.
 #
-#   I can probably google this somehow, but bls signatures, anyone knows off the
-#   top of their head if they have to be combined one by one, or can two group
-#   signatures be combined? what happens to overlap then?
-#   Danny Ryan
-#   @djrtwo
-#   Dec 21 12:00
-#   Yeah, you can do any linear combination of signatures. but you have to
-#   remember the linear combination of pubkeys that constructed
-#   if you have two instances of a signature from pubkey p, then you need 2*p in
-#   the group pubkey
-#   because the attestation bitfield is only 1 bit per pubkey right now,
-#   attestations do not support this
-#   it could be extended to support N overlaps up to N times per pubkey if we
-#   had N bits per validator instead of 1
-#   We are shying away from this for the time being. If there end up being
-#   substantial difficulties in network layer aggregation, then adding bits
-#   to aid in supporting overlaps is one potential solution
-#   Jacek Sieka
-#   @arnetheduck
-#   Dec 21 12:02
-#   ah nice, you anticipated my followup question there :) so it's not a
-#   straight-off set union operation
-#   Danny Ryan
-#   @djrtwo
-#   Dec 21 12:02
-#   depending on the particular network level troubles we run into
-#   right
-#   aggregatng sigs and pubkeys are both just ec adds
-#   https://github.com/ethereum/py-evm/blob/d82b10ae361cde6abbac62f171fcea7809c4e3cf/eth/_utils/bls.py#L191-L202
-#   subtractions work too (i suppose this is obvious). You can linearly combine
-#   sigs or pubs in any way
-
+# In eth2, we use a single bit to record which keys have signed, thus we cannot
+# combined overlapping aggregates - ie if we have an aggregate of signatures of
+# A, B and C, and another with B, C and D, we cannot practically combine them
+# even if in theory it is possible to allow this in BLS.
 
 import
   stew/[endians2, objects, byteutils], hashes, nimcrypto/utils,
   blscurve, json_serialization,
-  ../version, digest,
+  digest,
   chronicles
 
 export
@@ -145,10 +122,10 @@ func pubKey*(pk: ValidatorPrivKey): ValidatorPubKey =
   else:
     pk.getKey
 
-func init(T: type VerKey): VerKey =
+func init*(T: type VerKey): VerKey =
   result.point.inf()
 
-func init(T: type SigKey): SigKey =
+func init*(T: type Signature): Signature =
   result.point.inf()
 
 func combine*[T](values: openarray[BlsValue[T]]): BlsValue[T] =
@@ -161,11 +138,15 @@ func combine*[T](x: var BlsValue[T], other: BlsValue[T]) =
   doAssert x.kind == Real and other.kind == Real
   x.blsValue.combine(other.blsValue)
 
-# https://github.com/ethereum/eth2.0-specs/blob/v0.9.2/specs/bls_signature.md#bls_aggregate_pubkeys
+# https://github.com/ethereum/eth2.0-specs/blob/v0.9.4/specs/bls_signature.md#bls_aggregate_pubkeys
 func bls_aggregate_pubkeys*(keys: openArray[ValidatorPubKey]): ValidatorPubKey =
   keys.combine()
 
-# https://github.com/ethereum/eth2.0-specs/blob/v0.9.2/specs/bls_signature.md#bls_verify
+# https://github.com/ethereum/eth2.0-specs/blob/v0.9.4/specs/bls_signature.md#bls_aggregate_signatures
+func bls_aggregate_signatures*(keys: openArray[ValidatorSig]): ValidatorSig =
+  keys.combine()
+
+# https://github.com/ethereum/eth2.0-specs/blob/v0.9.4/specs/bls_signature.md#bls_verify
 func bls_verify*(
     pubkey: ValidatorPubKey, msg: openArray[byte], sig: ValidatorSig,
     domain: Domain): bool =
@@ -179,8 +160,10 @@ func bls_verify*(
       return false
     # TODO bls_verify_multiple(...) used to have this workaround, and now it
     # lives here. No matter the signature, there's also no meaningful way to
-    # verify it -- it's a kind of vacuous truth. No pubkey/sig pairs.
-    if pubkey == default(ValidatorPubKey):
+    # verify it -- it's a kind of vacuous truth. No pubkey/sig pairs. Sans a
+    # getBytes() or similar mechanism, pubKey == default(ValidatorPubKey) is
+    # a way to create many false positive matches. This seems odd.
+    if pubkey.getBytes() == default(ValidatorPubKey).getBytes():
       return true
 
     sig.blsValue.verify(msg, domain, pubkey.blsValue)
@@ -269,31 +252,6 @@ else:
   proc newPrivKey*(): ValidatorPrivKey =
     SigKey.random()
 
-when networkBackend == rlpxBackend:
-  import eth/rlp
-
-  when ValidatorPubKey is BlsValue:
-    proc append*(writer: var RlpWriter, value: ValidatorPubKey) =
-      writer.append if value.kind == Real: value.blsValue.getBytes()
-                    else: value.blob
-  else:
-    proc append*(writer: var RlpWriter, value: ValidatorPubKey) =
-      writer.append value.getBytes()
-
-  proc read*(rlp: var Rlp, T: type ValidatorPubKey): T {.inline.} =
-    result.initFromBytes rlp.toBytes.toOpenArray
-
-  when ValidatorSig is BlsValue:
-    proc append*(writer: var RlpWriter, value: ValidatorSig) =
-      writer.append if value.kind == Real: value.blsValue.getBytes()
-                    else: value.blob
-  else:
-    proc append*(writer: var RlpWriter, value: ValidatorSig) =
-      writer.append value.getBytes()
-
-  proc read*(rlp: var Rlp, T: type ValidatorSig): T {.inline.} =
-    result.initFromBytes rlp.toBytes.toOpenArray
-
 proc writeValue*(writer: var JsonWriter, value: VerKey) {.inline.} =
   writer.writeValue($value)
 
@@ -314,4 +272,3 @@ proc toGaugeValue*(hash: Eth2Digest): int64 =
 
 template fromSszBytes*(T: type BlsValue, bytes: openarray[byte]): auto =
   fromBytes(T, bytes)
-

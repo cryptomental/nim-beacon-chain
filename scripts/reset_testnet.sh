@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -eu
+set -e
 
 cd $(dirname "$0")
 
@@ -22,7 +22,7 @@ fi
 echo Execution plan:
 
 echo "Testnet name            : $NETWORK"
-echo "Bootstrap node hostname : ${BOOTSTRAP_HOST:="master-01.do-ams3.nimbus.test.statusim.net"}"
+echo "Bootstrap node hostname : ${BOOTSTRAP_HOST:="master-01.aws-eu-central-1a.nimbus.test.statusim.net"}"
 echo "Bootstrap node ip       : ${BOOTSTRAP_IP:="$(dig +short $BOOTSTRAP_HOST)"}"
 echo "Bootstrap node port     : ${BOOTSTRAP_PORT:=9000}"
 echo "Reset testnet at end    : ${PUBLISH_TESTNET_RESETS:="1"}"
@@ -32,11 +32,10 @@ echo "Beacon node data dir    : ${DATA_DIR:="build/testnet-reset-data/$NETWORK"}
 echo "Nim build flags         : $NETWORK_NIM_FLAGS"
 
 while true; do
-    read -p "Continue?" yn
+    read -p "Continue? [Yn] " yn
     case $yn in
-        [Yy]* ) break;;
+        * ) break;;
         [Nn]* ) exit 1;;
-        * ) echo "Please answer yes or no.";;
     esac
 done
 
@@ -56,39 +55,42 @@ fi
 
 mkdir -p "$DEPOSITS_DIR_ABS"
 
-DOCKER_BEACON_NODE="docker run -v $DEPOSITS_DIR_ABS:/deposits_dir -v $NETWORK_DIR_ABS:/network_dir -v $DATA_DIR_ABS:/data_dir statusteam/nimbus_beacon_node:$NETWORK"
-
-make deposit_contract
-
 if [ "$ETH1_PRIVATE_KEY" != "" ]; then
+  make deposit_contract
   echo "Deploying deposit contract through $WEB3_URL_ARG..."
   DEPOSIT_CONTRACT_ADDRESS=$(./build/deposit_contract deploy $WEB3_URL_ARG --private-key=$ETH1_PRIVATE_KEY)
   DEPOSIT_CONTRACT_ADDRESS_ARG="--deposit-contract=$DEPOSIT_CONTRACT_ADDRESS"
   echo "Done: $DEPOSIT_CONTRACT_ADDRESS"
 fi
 
+echo "Building a local beacon_node instance for 'makeDeposits' and 'createTestnet'"
+make NIMFLAGS="-d:insecure -d:testnet_servers_image ${NETWORK_NIM_FLAGS}" beacon_node
+
 cd docker
+
+echo "Building Docker image..."
+# CPU-specific CFLAGS that work on the servers are in MARCH_NIM_FLAGS,
+# in docker/Makefile, and are enabled by default.
 make build
 
-$DOCKER_BEACON_NODE makeDeposits \
+../build/beacon_node makeDeposits \
   --quickstart-deposits=$QUICKSTART_VALIDATORS \
   --random-deposits=$RANDOM_VALIDATORS \
-  --deposits-dir=/deposits_dir
+  --deposits-dir="$DEPOSITS_DIR_ABS"
 
 TOTAL_VALIDATORS="$(( $QUICKSTART_VALIDATORS + $RANDOM_VALIDATORS ))"
 
-$DOCKER_BEACON_NODE \
-  --data-dir=/data_dir \
-  createTestnet \
-  --validators-dir=/deposits_dir \
+../build/beacon_node createTestnet \
+  --data-dir="$DATA_DIR_ABS" \
+  --validators-dir="$DEPOSITS_DIR_ABS" \
   --total-validators=$TOTAL_VALIDATORS \
   --last-user-validator=$QUICKSTART_VALIDATORS \
-  --output-genesis=/network_dir/genesis.ssz \
-  --output-bootstrap-file=/network_dir/bootstrap_nodes.txt \
+  --output-genesis="$NETWORK_DIR_ABS/genesis.ssz" \
+  --output-bootstrap-file="$NETWORK_DIR_ABS/bootstrap_nodes.txt" \
   --bootstrap-address=$BOOTSTRAP_IP \
   --bootstrap-port=$BOOTSTRAP_PORT \
   $WEB3_URL_ARG $DEPOSIT_CONTRACT_ADDRESS_ARG \
-  --genesis-offset=900 # Delay in seconds
+  --genesis-offset=300 # Delay in seconds
 
 COMMITTED_FILES=" genesis.ssz bootstrap_nodes.txt "
 
@@ -111,13 +113,14 @@ if [[ $PUBLISH_TESTNET_RESETS != "0" ]]; then
     > /tmp/reset-network.sh
 
   bash /tmp/reset-network.sh
+  rm /tmp/reset-network.sh
 
   echo Uploading bootstrap node network key
   BOOTSTRAP_NODE_DOCKER_PATH=/docker/beacon-node-$NETWORK-1/data/BeaconNode/
   scp "$DATA_DIR_ABS/privkey.protobuf" $BOOTSTRAP_HOST:/tmp/
   ssh $BOOTSTRAP_HOST "sudo install -o dockremap -g docker /tmp/privkey.protobuf $BOOTSTRAP_NODE_DOCKER_PATH"
 
-  echo Publishing docker image...
+  echo "Publishing Docker image..."
   make push-last
 
   echo Persisting testnet data to git...
@@ -132,4 +135,5 @@ if [[ $PUBLISH_TESTNET_RESETS != "0" ]]; then
     > /tmp/restart-nodes.sh
 
   bash /tmp/restart-nodes.sh
+  rm /tmp/restart-nodes.sh
 fi

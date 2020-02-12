@@ -13,7 +13,7 @@ proc init*(T: type RequestManager, network: Eth2Node): T =
   T(network: network)
 
 type
-  FetchAncestorsResponseHandler = proc (b: BeaconBlock) {.gcsafe.}
+  FetchAncestorsResponseHandler = proc (b: SignedBeaconBlock) {.gcsafe.}
 
 proc fetchAncestorBlocksFromPeer(
      peer: Peer,
@@ -47,6 +47,5 @@ proc fetchAncestorBlocks*(requestManager: RequestManager,
 
   const ParallelRequests = 2
 
-  var fetchComplete = false
   for peer in requestManager.network.randomPeers(ParallelRequests, BeaconSync):
     traceAsyncErrors peer.fetchAncestorBlocksFromPeer(roots.sample(), responseHandler)

@@ -20,13 +20,13 @@ import
 
 const OperationsAttestationsDir = SszTestsDir/const_preset/"phase0"/"operations"/"attestation"/"pyspec_tests"
 
-template runTest(testName: string, identifier: untyped) =
+proc runTest(identifier: string) =
   # We wrap the tests in a proc to avoid running out of globals
   # in the future: Nim supports up to 3500 globals
   # but unittest with the macro/templates put everything as globals
   # https://github.com/nim-lang/Nim/issues/12084#issue-486866402
 
-  const testDir = OperationsAttestationsDir / astToStr(identifier)
+  let testDir = OperationsAttestationsDir / identifier
 
   proc `testImpl _ operations_attestations _ identifier`() =
 
@@ -39,7 +39,7 @@ template runTest(testName: string, identifier: untyped) =
     else:
       prefix = "[Invalid] "
 
-    test prefix & testName & " (" & astToStr(identifier) & ")":
+    timedTest prefix & identifier:
       var stateRef, postRef: ref BeaconState
       var attestationRef: ref Attestation
       new attestationRef
@@ -66,18 +66,5 @@ template runTest(testName: string, identifier: untyped) =
   `testImpl _ operations_attestations _ identifier`()
 
 suite "Official - Operations - Attestations " & preset():
-  runTest("success", success)
-  runTest("success previous epoch", success_previous_epoch)
-  runTest("invalid attestation signature", invalid_attestation_signature)
-  runTest("before inclusion delay", before_inclusion_delay)
-  runTest("after_epoch_slots", after_epoch_slots)
-  runTest("old source epoch", old_source_epoch)
-  runTest("old target epoch", old_target_epoch)
-  runTest("future target epoch", future_target_epoch)
-  runTest("new source epoch", new_source_epoch)
-  runTest("source root is target root", source_root_is_target_root)
-  runTest("invalid current source root", invalid_current_source_root)
-  runTest("bad source root", bad_source_root)
-  runTest("empty aggregation bits", empty_aggregation_bits)
-  runTest("too many aggregation bits", too_many_aggregation_bits)
-  runTest("too few aggregation bits", too_few_aggregation_bits)
+  for kind, path in walkDir(OperationsAttestationsDir, true):
+    runTest(path)

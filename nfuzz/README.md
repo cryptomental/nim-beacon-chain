@@ -19,6 +19,12 @@ make libnfuzz.a
 make libnfuzz.so
 ```
 
+Default, the library is build with the `minimal` config. To select a specific config you can instead run:
+```bash
+# build with mainnet config
+make libnfuzz.a NIMFLAGS="-d:const_preset=mainnet"
+```
+
 For the library to be useful for fuzzing with libFuzzer (e.g. for
 integration with [beacon-fuzz](https://github.com/sigp/beacon-fuzz)) we can pass
 additional Nim arguments, e.g.:
@@ -26,6 +32,7 @@ additional Nim arguments, e.g.:
 ```bash
 make libnfuzz.a NIMFLAGS="--cc:clang --passC:'-fsanitize=fuzzer-no-link' --passL='-fsanitize=fuzzer'"
 ```
+To disable BLS verification on deserialization of SSZ objects add `-d:ssz_testing` to the NIMFLAGS.
 
 Other useful options might include: `--clang.path:<path>`, `--clang.exe:<exe>`, `--clang.linkerexe:<exe>`, `-d:const_preset=mainnet`
 

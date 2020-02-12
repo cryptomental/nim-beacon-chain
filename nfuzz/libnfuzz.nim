@@ -57,7 +57,6 @@ proc copyState(state: BeaconState, output: ptr byte,
   copyMem(output, unsafeAddr resultState[0], output_size[])
   result = true
 
-
 proc nfuzz_attestation(input: openArray[byte], output: ptr byte,
     output_size: ptr uint): bool {.exportc, raises: [FuzzCrashError, Defect].} =
   var
@@ -90,7 +89,6 @@ proc nfuzz_attestation(input: openArray[byte], output: ptr byte,
   if result:
     result = copyState(data.state, output, output_size)
 
-
 proc nfuzz_attester_slashing(input: openArray[byte], output: ptr byte,
     output_size: ptr uint): bool {.exportc, raises: [FuzzCrashError, Defect].} =
   var
@@ -120,7 +118,6 @@ proc nfuzz_attester_slashing(input: openArray[byte], output: ptr byte,
 
   if result:
     result = copyState(data.state, output, output_size)
-
 
 proc nfuzz_block(input: openArray[byte], output: ptr byte,
     output_size: ptr uint): bool {.exportc, raises: [FuzzCrashError, Defect].} =
@@ -153,7 +150,6 @@ proc nfuzz_block(input: openArray[byte], output: ptr byte,
 
   if result:
     result = copyState(data.state, output, output_size)
-
 
 proc nfuzz_block_header(input: openArray[byte], output: ptr byte,
     output_size: ptr uint): bool {.exportc, raises: [FuzzCrashError, Defect].} =

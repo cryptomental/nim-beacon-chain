@@ -1,9 +1,8 @@
 import
   deques, sequtils, tables,
-  chronicles, stew/bitseqs, json_serialization/std/sets,
+  chronicles, stew/[bitseqs, byteutils], json_serialization/std/sets,
   ./spec/[beaconstate, datatypes, crypto, digest, helpers, validator],
-  ./extras, ./ssz, ./block_pool,
-  beacon_node_types
+  ./extras, ./ssz, ./block_pool, ./beacon_node_types
 
 logScope: topics = "attpool"
 
@@ -146,25 +145,37 @@ func get_attesting_indices_seq(state: BeaconState,
   toSeq(items(get_attesting_indices(
     state, attestation_data, bits, cache)))
 
-proc add*(pool: var AttestationPool,
-          state: BeaconState,
-          blck: BlockRef,
-          attestation: Attestation) =
-  # TODO there are constraints on the state and block being passed in here
-  #      but what these are is unclear.. needs analyzing from a high-level
-  #      perspective / spec intent
-  # TODO should update the state correctly in here instead of forcing the caller
-  #      to do it...
-  logScope: pcs = "atp_add_attestation"
+func addUnresolved(pool: var AttestationPool, attestation: Attestation) =
+  pool.unresolved[attestation.data.beacon_block_root] =
+    UnresolvedAttestation(
+      attestation: attestation,
+    )
 
+proc addResolved(pool: var AttestationPool, blck: BlockRef, attestation: Attestation) =
   doAssert blck.root == attestation.data.beacon_block_root
+
+  # TODO Which state should we use to validate the attestation? It seems
+  #      reasonable to involve the head being voted for as well as the intended
+  #      slot of the attestation - double-check this with spec
+
+  # A basic check is that the attestation is at least as new as the block being
+  # voted for..
+  if blck.slot > attestation.data.slot:
+    notice "Invalid attestation (too new!)",
+      attestation = shortLog(attestation),
+      blockSlot = shortLog(blck.slot)
+    return
+
+  updateStateData(
+    pool.blockPool, pool.blockPool.tmpState,
+    BlockSlot(blck: blck, slot: attestation.data.slot))
+
+  template state(): BeaconState = pool.blockPool.tmpState.data.data
 
   if not validate(state, attestation):
     notice "Invalid attestation",
-      attestationData = shortLog(attestation.data),
+      attestation = shortLog(attestation),
       current_epoch = get_current_epoch(state),
-      target_epoch = attestation.data.target.epoch,
-      stateSlot = state.slot,
       cat = "filtering"
     return
 
@@ -218,11 +229,10 @@ proc add*(pool: var AttestationPool,
         pool.updateLatestVotes(state, attestationSlot, participants, a.blck)
 
         info "Attestation resolved",
-          attestationData = shortLog(attestation.data),
+          attestation = shortLog(attestation),
           validations = a.validations.len(),
           current_epoch = get_current_epoch(state),
-          target_epoch = attestation.data.target.epoch,
-          stateSlot = state.slot,
+          blockSlot = shortLog(blck.slot),
           cat = "filtering"
 
         found = true
@@ -238,18 +248,22 @@ proc add*(pool: var AttestationPool,
     pool.updateLatestVotes(state, attestationSlot, participants, blck)
 
     info "Attestation resolved",
-      attestationData = shortLog(attestation.data),
+      attestation = shortLog(attestation),
       current_epoch = get_current_epoch(state),
-      target_epoch = attestation.data.target.epoch,
-      stateSlot = state.slot,
       validations = 1,
+      blockSlot = shortLog(blck.slot),
       cat = "filtering"
 
-func addUnresolved*(pool: var AttestationPool, attestation: Attestation) =
-  pool.unresolved[attestation.data.beacon_block_root] =
-    UnresolvedAttestation(
-      attestation: attestation,
-    )
+proc add*(pool: var AttestationPool, attestation: Attestation) =
+  logScope: pcs = "atp_add_attestation"
+
+  let blck = pool.blockPool.getOrResolve(attestation.data.beacon_block_root)
+
+  if blck.isNil:
+    pool.addUnresolved(attestation)
+    return
+
+  pool.addResolved(blck, attestation)
 
 proc getAttestationsForBlock*(
     pool: AttestationPool, state: BeaconState,
@@ -257,7 +271,7 @@ proc getAttestationsForBlock*(
   logScope: pcs = "retrieve_attestation"
 
   if newBlockSlot < (GENESIS_SLOT + MIN_ATTESTATION_INCLUSION_DELAY):
-    debug "[Attestion Pool] Too early for attestations",
+    debug "Too early for attestations",
       newBlockSlot = shortLog(newBlockSlot),
       cat = "query"
     return
@@ -333,7 +347,9 @@ proc getAttestationsForBlock*(
     if result.len >= MAX_ATTESTATIONS:
       return
 
-proc resolve*(pool: var AttestationPool, cache: var StateData) =
+proc resolve*(pool: var AttestationPool) =
+  logScope: pcs = "atp_resolve"
+
   var
     done: seq[Eth2Digest]
     resolved: seq[tuple[blck: BlockRef, attestation: Attestation]]
@@ -351,11 +367,72 @@ proc resolve*(pool: var AttestationPool, cache: var StateData) =
     pool.unresolved.del(k)
 
   for a in resolved:
-    pool.blockPool.updateStateData(
-      cache, BlockSlot(blck: a.blck, slot: a.blck.slot))
-
-    pool.add(cache.data.data, a.blck, a.attestation)
+    pool.addResolved(a.blck, a.attestation)
 
 func latestAttestation*(
     pool: AttestationPool, pubKey: ValidatorPubKey): BlockRef =
   pool.latestAttestations.getOrDefault(pubKey)
+
+# https://github.com/ethereum/eth2.0-specs/blob/v0.8.4/specs/core/0_fork-choice.md
+# The structure of this code differs from the spec since we use a different
+# strategy for storing states and justification points - it should nonetheless
+# be close in terms of functionality.
+func lmdGhost*(
+    pool: AttestationPool, start_state: BeaconState,
+    start_block: BlockRef): BlockRef =
+  # TODO: a Fenwick Tree datastructure to keep track of cumulated votes
+  #       in O(log N) complexity
+  #       https://en.wikipedia.org/wiki/Fenwick_tree
+  #       Nim implementation for cumulative frequencies at
+  #       https://github.com/numforge/laser/blob/990e59fffe50779cdef33aa0b8f22da19e1eb328/benchmarks/random_sampling/fenwicktree.nim
+
+  let
+    active_validator_indices =
+      get_active_validator_indices(
+        start_state, compute_epoch_at_slot(start_state.slot))
+
+  var latest_messages: seq[tuple[validator: ValidatorIndex, blck: BlockRef]]
+  for i in active_validator_indices:
+    let pubKey = start_state.validators[i].pubkey
+    if (let vote = pool.latestAttestation(pubKey); not vote.isNil):
+      latest_messages.add((i, vote))
+
+  # TODO: update to 0.10.1: https://github.com/ethereum/eth2.0-specs/pull/1589/files#diff-9fc3792aa94456eb29506fa77f77b918R143
+  template get_latest_attesting_balance(blck: BlockRef): uint64 =
+    var res: uint64
+    for validator_index, target in latest_messages.items():
+      if get_ancestor(target, blck.slot) == blck:
+        res += start_state.validators[validator_index].effective_balance
+    res
+
+  var head = start_block
+  while true:
+    if head.children.len() == 0:
+      return head
+
+    if head.children.len() == 1:
+      head = head.children[0]
+    else:
+      var
+        winner = head.children[0]
+        winCount = get_latest_attesting_balance(winner)
+
+      for i in 1..<head.children.len:
+        let
+          candidate = head.children[i]
+          candCount = get_latest_attesting_balance(candidate)
+
+        if (candCount > winCount) or
+            ((candCount == winCount and candidate.root.data < winner.root.data)):
+          winner = candidate
+          winCount = candCount
+      head = winner
+
+proc selectHead*(pool: AttestationPool): BlockRef =
+  let
+    justifiedHead = pool.blockPool.latestJustifiedBlock()
+
+  let newHead =
+    lmdGhost(pool, pool.blockPool.justifiedState.data.data, justifiedHead.blck)
+
+  newHead

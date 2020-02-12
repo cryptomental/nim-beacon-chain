@@ -1,5 +1,6 @@
 import
-  os, options, strformat,
+  os, options, strformat, strutils,
+  chronicles, confutils,
   confutils/defs, chronicles/options as chroniclesOptions,
   spec/[crypto]
 
@@ -89,6 +90,11 @@ type
         desc: "Specifies a line-delimited file of bootsrap Ethereum network addresses."
         name: "bootstrap-file" }: InputFile
 
+      enrBootstrapNodesFile* {.
+        defaultValue: ""
+        desc: "Specifies a line-delimited file of bootstrap ENR records"
+        name: "enr-bootstrap-file" }: InputFile
+
       tcpPort* {.
         defaultValue: defaultPort(config)
         desc: "TCP listening port."
@@ -98,6 +104,11 @@ type
         defaultValue: defaultPort(config)
         desc: "UDP listening port."
         name: "udp-port" }: int
+
+      maxPeers* {.
+        defaultValue: 10
+        desc: "The maximum number of peers to connect to"
+        name: "max-peers" }: int
 
       nat* {.
         desc: "Specify method to use for determining public address. " &
@@ -251,3 +262,25 @@ proc validatorFileBaseName*(validatorIdx: int): string =
 
 func dumpDir*(conf: BeaconNodeConf): string =
   conf.dataDir / "dump"
+
+func localValidatorsDir*(conf: BeaconNodeConf): string =
+  conf.dataDir / "validators"
+
+func databaseDir*(conf: BeaconNodeConf): string =
+  conf.dataDir / "db"
+
+iterator validatorKeys*(conf: BeaconNodeConf): ValidatorPrivKey =
+  for validatorKeyFile in conf.validators:
+    try:
+      yield validatorKeyFile.load
+    except CatchableError as err:
+      warn "Failed to load validator private key",
+        file = validatorKeyFile.string, err = err.msg
+
+  for kind, file in walkDir(conf.localValidatorsDir):
+    if kind in {pcFile, pcLinkToFile} and
+        cmpIgnoreCase(".privkey", splitFile(file).ext) == 0:
+      try:
+        yield ValidatorPrivKey.init(readFile(file).string)
+      except CatchableError as err:
+        warn "Failed to load a validator private key", file, err = err.msg

@@ -1,6 +1,7 @@
 import
   options, tables,
-  chronos, json_serialization, strutils, chronicles, metrics, eth/net/nat,
+  chronos, json_serialization, strutils, chronicles, metrics,
+  eth/net/nat, eth/p2p/discoveryv5/enr,
   version, conf
 
 const
@@ -56,98 +57,38 @@ proc setupNat(conf: BeaconNodeConf): tuple[ip: IpAddress,
       if extPorts.isSome:
         (result.tcpPort, result.udpPort) = extPorts.get()
 
-when networkBackend == rlpxBackend:
-  import
-    os,
-    eth/[rlp, p2p, keys], gossipsub_protocol,
-    eth/p2p/peer_pool # for log on connected peers
-
-  export
-    p2p, rlp, gossipsub_protocol
-
-  const
-    netBackendName* = "rlpx"
-    IrrelevantNetwork* = UselessPeer
-
-  type
-    Eth2Node* = EthereumNode
-    Eth2NodeIdentity* = KeyPair
-    BootstrapAddr* = ENode
-
-  proc getPersistentNetIdentity*(conf: BeaconNodeConf): Eth2NodeIdentity =
-    let privateKeyFile = conf.dataDir / "network.privkey"
-    var privKey: PrivateKey
-    if not fileExists(privateKeyFile):
-      privKey = newPrivateKey()
-      createDir conf.dataDir.string
-      writeFile(privateKeyFile, $privKey)
-    else:
-      privKey = initPrivateKey(readFile(privateKeyFile).string)
-
-    KeyPair(seckey: privKey, pubkey: privKey.getPublicKey())
-
-  proc getPersistenBootstrapAddr*(conf: BeaconNodeConf,
-                                  ip: IpAddress, port: Port): BootstrapAddr =
-    let
-      identity = getPersistentNetIdentity(conf)
-      address = Address(ip: ip, tcpPort: port, udpPort: port)
-
-    initENode(identity.pubKey, address)
-
-  proc isSameNode*(bootstrapNode: BootstrapAddr, id: Eth2NodeIdentity): bool =
-    bootstrapNode.pubKey == id.pubKey
-
-  proc shortForm*(id: Eth2NodeIdentity): string =
-    ($id.pubKey)[0..5]
-
-  proc writeValue*(writer: var JsonWriter, value: BootstrapAddr) {.inline.} =
-    writer.writeValue $value
-
-  proc readValue*(reader: var JsonReader, value: var BootstrapAddr) {.inline.} =
-    value = initENode reader.readValue(string)
-
-  proc createEth2Node*(conf: BeaconNodeConf,
-                       bootstrapNodes: seq[BootstrapAddr]): Future[EthereumNode] {.async.} =
-    let
-      keys = getPersistentNetIdentity(conf)
-      (ip, tcpPort, udpPort) = setupNat(conf)
-      address = Address(ip: ip,
-                        tcpPort: tcpPort,
-                        udpPort: udpPort)
-
-    # TODO there are more networking options to add here: local bind ip, ipv6
-    #      etc.
-    return newEthereumNode(keys, address, 0,
-                           nil, clientId)
-
-  proc saveConnectionAddressFile*(node: Eth2Node, filename: string) =
-    writeFile(filename, $node.listeningAddress)
-
-  proc initAddress*(T: type BootstrapAddr, str: string): T =
-    initENode(str)
-
-  func peersCount*(node: Eth2Node): int =
-    node.peerPool.len
-
-else:
+when networkBackend in [libp2p, libp2pDaemon]:
   import
     os, random,
-    stew/io, eth/async_utils, libp2p/crypto/crypto,
+    stew/io, eth/async_utils,
+    libp2p/crypto/crypto, libp2p/[multiaddress, multicodec],
     ssz
 
-  when networkBackend == libp2pBackend:
+  export
+    multiaddress
+
+  when networkBackend == libp2p:
     import
-      libp2p_backend
+      libp2p/standard_setup, libp2p_backend
 
     export
       libp2p_backend
 
   else:
     import
-      libp2p/daemon/daemonapi, libp2p/multiaddress, libp2p_daemon_backend
+      libp2p/daemon/daemonapi, libp2p_daemon_backend
 
     export
       libp2p_daemon_backend
+
+    var mainDaemon: DaemonAPI
+
+    proc closeDaemon() {.noconv.} =
+      if mainDaemon != nil:
+        info "Shutting down the LibP2P daemon"
+        waitFor mainDaemon.close()
+
+    addQuitProc(closeDaemon)
 
   const
     netBackendName* = "libp2p"
@@ -164,6 +105,12 @@ else:
     else:
       raise newException(MultiAddressError,
                          "Invalid bootstrap node multi-address")
+
+  template tcpEndPoint(address, port): auto =
+    MultiAddress.init(address, Protocol.IPPROTO_TCP, port)
+
+  proc initAddress*(T: type BootstrapAddr, ip: IpAddress, tcpPort: Port): T =
+    tcpEndPoint(ip, tcpPort)
 
   proc ensureNetworkIdFile(conf: BeaconNodeConf): string =
     result = conf.dataDir / networkKeyFilename
@@ -185,52 +132,57 @@ else:
 
     result = KeyPair(seckey: privKey, pubkey: privKey.getKey())
 
-  template tcpEndPoint(address, port): auto =
-    MultiAddress.init(address, Protocol.IPPROTO_TCP, port)
-
-  var mainDaemon: DaemonAPI
-
   proc allMultiAddresses(nodes: seq[BootstrapAddr]): seq[string] =
     for node in nodes:
       result.add $node
 
   proc createEth2Node*(conf: BeaconNodeConf,
-                       bootstrapNodes: seq[BootstrapAddr]): Future[Eth2Node] {.async.} =
+                       bootstrapNodes: seq[BootstrapAddr],
+                       bootstrapEnrs: seq[enr.Record]): Future[Eth2Node] {.async.} =
     var
       (extIp, extTcpPort, _) = setupNat(conf)
       hostAddress = tcpEndPoint(globalListeningAddr, Port conf.tcpPort)
       announcedAddresses = if extIp == globalListeningAddr: @[]
                            else: @[tcpEndPoint(extIp, extTcpPort)]
-      keyFile = conf.ensureNetworkIdFile
 
-    info "Starting the LibP2P daemon", hostAddress, announcedAddresses,
-                                       keyFile, bootstrapNodes
+    info "Initializing networking", hostAddress,
+                                    announcedAddresses,
+                                    bootstrapNodes
 
-    var daemonFut = if bootstrapNodes.len == 0:
-      newDaemonApi({PSNoSign, DHTFull, PSFloodSub},
-                   id = keyFile,
-                   hostAddresses = @[hostAddress],
-                   announcedAddresses = announcedAddresses)
+    when networkBackend == libp2p:
+      let keys = conf.getPersistentNetIdentity
+      # TODO nim-libp2p still doesn't have support for announcing addresses
+      # that are different from the host address (this is relevant when we
+      # are running behind a NAT).
+      var switch = newStandardSwitch(some keys.seckey, hostAddress,
+                                     triggerSelf = true, gossip = false)
+      result = Eth2Node.init(conf, switch, keys.seckey)
+      for enr in bootstrapEnrs:
+        result.addKnownPeer(enr)
+      await result.start()
     else:
-      newDaemonApi({PSNoSign, DHTFull, PSFloodSub, WaitBootstrap},
-                   id = keyFile,
-                   hostAddresses = @[hostAddress],
-                   announcedAddresses = announcedAddresses,
-                   bootstrapNodes = allMultiAddresses(bootstrapNodes),
-                   peersRequired = 1)
+      let keyFile = conf.ensureNetworkIdFile
 
-    mainDaemon = await daemonFut
-    var identity = await mainDaemon.identity()
+      var daemonFut = if bootstrapNodes.len == 0:
+        newDaemonApi({PSNoSign, DHTFull, PSFloodSub},
+                     id = keyFile,
+                     hostAddresses = @[hostAddress],
+                     announcedAddresses = announcedAddresses)
+      else:
+        newDaemonApi({PSNoSign, DHTFull, PSFloodSub, WaitBootstrap},
+                     id = keyFile,
+                     hostAddresses = @[hostAddress],
+                     announcedAddresses = announcedAddresses,
+                     bootstrapNodes = allMultiAddresses(bootstrapNodes),
+                     peersRequired = 1)
 
-    info "LibP2P daemon started", peer = identity.peer.pretty(),
-                                  addresses = identity.addresses
+      mainDaemon = await daemonFut
 
-    proc closeDaemon() {.noconv.} =
-      info "Shutting down the LibP2P daemon"
-      waitFor mainDaemon.close()
-    addQuitProc(closeDaemon)
+      var identity = await mainDaemon.identity()
+      info "LibP2P daemon started", peer = identity.peer.pretty(),
+                                    addresses = identity.addresses
 
-    return await Eth2Node.init(mainDaemon)
+      result = await Eth2Node.init(mainDaemon)
 
   proc getPersistenBootstrapAddr*(conf: BeaconNodeConf,
                                   ip: IpAddress, port: Port): BootstrapAddr =
@@ -247,21 +199,31 @@ else:
   proc shortForm*(id: Eth2NodeIdentity): string =
     $PeerID.init(id.pubkey)
 
+  proc multiAddressToPeerInfo(a: MultiAddress): PeerInfo =
+    if IPFS.match(a):
+      let
+        peerId = PeerID.init(a[2].protoAddress())
+        addresses = @[a[0] & a[1]]
+      when networkBackend == libp2p:
+        return PeerInfo.init(peerId, addresses)
+      else:
+        return PeerInfo(peer: peerId, addresses: addresses)
+
   proc connectToNetwork*(node: Eth2Node,
                          bootstrapNodes: seq[MultiAddress]) {.async.} =
     # TODO: perhaps we should do these in parallel
     var connected = false
     for bootstrapNode in bootstrapNodes:
       try:
-        if IPFS.match(bootstrapNode):
-          let pid = PeerID.init(bootstrapNode[2].protoAddress())
-          await node.daemon.connect(pid, @[bootstrapNode[0] & bootstrapNode[1]])
-          var peer = node.getPeer(pid)
-          peer.wasDialed = true
-          await initializeConnection(peer)
-          connected = true
+        let peerInfo = multiAddressToPeerInfo(bootstrapNode)
+        when networkBackend == libp2p:
+          discard await node.switch.dial(peerInfo)
         else:
-          raise newException(CatchableError, "Incorrect bootstrap address")
+          await node.daemon.connect(peerInfo.peer, peerInfo.addresses)
+        var peer = node.getPeer(peerInfo)
+        peer.wasDialed = true
+        await initializeConnection(peer)
+        connected = true
       except CatchableError as err:
         error "Failed to connect to bootstrap node",
                node = bootstrapNode, err = err.msg
@@ -271,33 +233,48 @@ else:
       quit 1
 
   proc saveConnectionAddressFile*(node: Eth2Node, filename: string) =
-    let id = waitFor node.daemon.identity()
-    writeFile(filename, $id.addresses[0] & "/p2p/" & id.peer.pretty)
-
-  proc loadConnectionAddressFile*(filename: string): PeerInfo =
-    Json.loadFile(filename, PeerInfo)
+    when networkBackend == libp2p:
+      writeFile(filename, $node.switch.peerInfo.addrs[0] & "/p2p/" &
+                          node.switch.peerInfo.id)
+    else:
+      let id = waitFor node.daemon.identity()
+      writeFile(filename, $id.addresses[0] & "/p2p/" & id.peer.pretty)
 
   func peersCount*(node: Eth2Node): int =
     node.peers.len
 
-  proc makeMessageHandler[MsgType](msgHandler: proc(msg: MsgType) {.gcsafe.}): P2PPubSubCallback =
-    result = proc(api: DaemonAPI,
-                  ticket: PubsubTicket,
-                  msg: PubSubMessage): Future[bool] {.async, gcsafe.} =
-      inc gossip_messages_received
-      trace "Incoming gossip bytes",
-        peer = msg.peer, len = msg.data.len, tops = msg.topics
-      msgHandler SSZ.decode(msg.data, MsgType)
-      return true
-
   proc subscribe*[MsgType](node: Eth2Node,
                            topic: string,
                            msgHandler: proc(msg: MsgType) {.gcsafe.} ) {.async, gcsafe.} =
-    discard await node.daemon.pubsubSubscribe(topic, makeMessageHandler(msgHandler))
+    template execMsgHandler(peerExpr, gossipBytes, gossipTopic) =
+      inc gossip_messages_received
+      trace "Incoming gossip bytes",
+        peer = peerExpr, len = gossipBytes.len, topic = gossipTopic
+      msgHandler SSZ.decode(gossipBytes, MsgType)
+
+    when networkBackend == libp2p:
+      let incomingMsgHandler = proc(topic: string,
+                                    data: seq[byte]) {.async, gcsafe.} =
+        execMsgHandler "unknown", data, topic
+
+      await node.switch.subscribe(topic, incomingMsgHandler)
+
+    else:
+      let incomingMsgHandler = proc(api: DaemonAPI,
+                                    ticket: PubsubTicket,
+                                    msg: PubSubMessage): Future[bool] {.async, gcsafe.} =
+        execMsgHandler msg.peer, msg.data, msg.topics[0]
+        return true
+
+      discard await node.daemon.pubsubSubscribe(topic, incomingMsgHandler)
 
   proc broadcast*(node: Eth2Node, topic: string, msg: auto) =
     inc gossip_messages_sent
-    traceAsyncErrors node.daemon.pubsubPublish(topic, SSZ.encode(msg))
+    let broadcastBytes = SSZ.encode(msg)
+    when networkBackend == libp2p:
+      traceAsyncErrors node.switch.publish(topic, broadcastBytes)
+    else:
+      traceAsyncErrors node.daemon.pubsubPublish(topic, broadcastBytes)
 
   # TODO:
   # At the moment, this is just a compatiblity shim for the existing RLPx functionality.
@@ -308,3 +285,5 @@ else:
     shuffle peers
     if peers.len > maxPeers: peers.setLen(maxPeers)
     for p in peers: yield p
+else:
+  {.fatal: "Unsupported network backend".}

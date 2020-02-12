@@ -3,11 +3,13 @@ import
 
 const
   rootDir = thisDir() / ".."
-  bootstrapFile = "bootstrap_nodes.txt"
-  depositContractFile = "deposit_contract.txt"
+  bootstrapTxtFileName = "bootstrap_nodes.txt"
+  bootstrapYamlFileName = "boot_enr.yaml"
+  depositContractFileName = "deposit_contract.txt"
   genesisFile = "genesis.ssz"
   configFile = "config.yaml"
   testnetsRepo = "eth2-testnets"
+  web3Url = "wss://goerli.infura.io/ws/v3/809a18497dd74102b5f37d25aae3c85a"
 
 let
   testnetsOrg = getEnv("ETH2_TESTNETS_ORG", "eth2-clients")
@@ -33,7 +35,12 @@ cli do (testnetName {.argument.}: string):
 
   rmDir(allTestnetsDir)
   cd buildDir
+
   exec &"git clone --quiet --depth=1 {testnetsGitUrl}"
+
+  var
+    depositContractOpt = ""
+    bootstrapFileOpt = ""
 
   let testnetDir = allTestnetsDir / team / testnet
   if not system.dirExists(testnetDir):
@@ -46,65 +53,95 @@ cli do (testnetName {.argument.}: string):
       echo &"The required file {fileName} is not present in '{testnetDir}'."
       quit 1
 
-  checkRequiredFile bootstrapFile
   checkRequiredFile genesisFile
+
+  let bootstrapTxtFile = testnetDir / bootstrapTxtFileName
+  if system.fileExists(bootstrapTxtFile):
+    bootstrapFileOpt = &"--bootstrap-file=\"{bootstrapTxtFile}\""
+  else:
+    let bootstrapYamlFile = testnetDir / bootstrapYamlFileName
+    if system.fileExists(bootstrapYamlFile):
+      bootstrapFileOpt = &"--enr-bootstrap-file=\"{bootstrapYamlFile}\""
+    else:
+      echo "Warning: the network metadata doesn't include a bootstrap file"
 
   var preset = testnetDir / configFile
   if not system.fileExists(preset): preset = "minimal"
 
   let
     dataDirName = testnetName.replace("/", "_")
+                             .replace("(", "_")
+                             .replace(")", "_")
     dataDir = buildDir / "data" / dataDirName
     validatorsDir = dataDir / "validators"
     dumpDir = dataDir / "dump"
     beaconNodeBinary = buildDir / "beacon_node_" & dataDirName
-    nimFlags = "-d:chronicles_log_level=DEBUG " & getEnv("NIM_PARAMS")
+  var
+    nimFlags = "-d:chronicles_log_level=TRACE " & getEnv("NIM_PARAMS")
 
-  var depositContractOpt = ""
-  let depositContractFile = testnetDir / depositContractFile
+  let depositContractFile = testnetDir / depositContractFileName
   if system.fileExists(depositContractFile):
     depositContractOpt = "--deposit-contract=" & readFile(depositContractFile).strip
 
   if system.dirExists(dataDir):
-    if system.fileExists(dataDir/genesisFile):
-      let localGenesisContent = readFile(dataDir/genesisFile)
-      let testnetGenesisContent = readFile(testnetDir/genesisFile)
-      if localGenesisContent != testnetGenesisContent:
-        echo "Detected testnet restart. Deleting previous database..."
-        rmDir dataDir
+    block resetDataDir:
+      # We reset the testnet data dir if the existing data dir is
+      # incomplete (it misses a genesis file) or if it has a genesis
+      # file from an older testnet:
+      if system.fileExists(dataDir/genesisFile):
+        let localGenesisContent = readFile(dataDir/genesisFile)
+        let testnetGenesisContent = readFile(testnetDir/genesisFile)
+        if localGenesisContent == testnetGenesisContent:
+          break
+      echo "Detected testnet restart. Deleting previous database..."
+      rmDir dataDir
 
   cd rootDir
+  if testnet == "testnet1":
+    nimFlags &= " -d:NETWORK_TYPE=libp2p"
   exec &"""nim c {nimFlags} -d:"const_preset={preset}" -o:"{beaconNodeBinary}" beacon_chain/beacon_node.nim"""
 
   mkDir dumpDir
 
+  proc execIgnoringExitCode(s: string) =
+    # reduces the error output when interrupting an external command with Ctrl+C
+    try:
+      exec s
+    except OsError:
+      discard
+
   if depositContractOpt.len > 0 and not system.dirExists(validatorsDir):
     mode = Silent
-    echo "Would you like to become a validator (you'll need access to 32 GoETH)? [Yn]"
-    while true:
-      let answer = readLineFromStdin()
-      if answer in ["y", "Y", "yes", ""]:
-        echo "Please enter your Eth1 private key in hex form (e.g. 0x1a2...f3c). Hit Enter to cancel."
-        let privKey = readLineFromStdin()
-        if privKey.len > 0:
-          mkDir validatorsDir
-          exec replace(&"""{beaconNodeBinary} makeDeposits
-            --random-deposits=1
-            --deposits-dir="{validatorsDir}"
-            --deposit-private-key={privKey}
-            --web3-url=wss://goerli.infura.io/ws/v3/809a18497dd74102b5f37d25aae3c85a
-            {depositContractOpt}
-            """, "\n", " ")
-        break
-      elif answer in ["n", "N", "no"]:
-        break
-      else:
-        echo "Please answer 'yes' or 'no'"
+    echo "\nPlease enter your Goerli Eth1 private key in hex form (e.g. 0x1a2...f3c) in order to become a validator (you'll need access to 32 GoETH)."
+    echo "Hit Enter to skip this."
+    # is there no other way to print without a trailing newline?
+    exec "printf '> '"
+    let privKey = readLineFromStdin()
+    if privKey.len > 0:
+      mkDir validatorsDir
+      mode = Verbose
+      execIgnoringExitCode replace(&"""{beaconNodeBinary} makeDeposits
+        --random-deposits=1
+        --deposits-dir="{validatorsDir}"
+        --deposit-private-key={privKey}
+        --web3-url={web3Url}
+        {depositContractOpt}
+        """, "\n", " ")
+      mode = Silent
+      echo "\nDeposit sent, wait for confirmation then press enter to continue"
+      discard readLineFromStdin()
+
+  let logLevel = getEnv("LOG_LEVEL")
+  var logLevelOpt = ""
+  if logLevel.len > 0:
+    logLevelOpt = "--log-level=" & logLevel
 
   mode = Verbose
-  exec replace(&"""{beaconNodeBinary}
+  execIgnoringExitCode replace(&"""{beaconNodeBinary}
     --data-dir="{dataDir}"
     --dump=true
-    --bootstrap-file="{testnetDir/bootstrapFile}"
+    --web3-url={web3Url}
+    {bootstrapFileOpt}
+    {logLevelOpt}
     --state-snapshot="{testnetDir/genesisFile}" """ & depositContractOpt, "\n", " ")
 
