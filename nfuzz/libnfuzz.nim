@@ -27,7 +27,7 @@ type
     proposerSlashing: ProposerSlashing
   VoluntaryExitInput = object
     state: BeaconState
-    exit: VoluntaryExit
+    exit: SignedVoluntaryExit
   # This and AssertionError are raised to indicate programming bugs
   # A wrapper to allow exception tracking to identify unexpected exceptions
   FuzzCrashError = object of Exception
@@ -62,6 +62,7 @@ proc nfuzz_attestation(input: openArray[byte], output: ptr byte,
   var
     data: AttestationInput
     cache = get_empty_per_epoch_cache()
+    flags: UpdateFlags
 
   try:
     data = SSZ.decode(input, AttestationInput)
@@ -74,8 +75,9 @@ proc nfuzz_attestation(input: openArray[byte], output: ptr byte,
     )
 
   try:
+    flags.incl skipValidation
     result = process_attestation(data.state, data.attestation,
-      {skipValidation}, cache)
+      flags, cache)
   except ValueError as e:
     # These exceptions are expected to be raised by chronicles logging:
     # See status-im/nim-chronicles#60
@@ -94,6 +96,7 @@ proc nfuzz_attester_slashing(input: openArray[byte], output: ptr byte,
   var
     data: AttesterSlashingInput
     cache = get_empty_per_epoch_cache()
+    flags: UpdateFlags
 
   try:
     data = SSZ.decode(input, AttesterSlashingInput)
@@ -107,7 +110,8 @@ proc nfuzz_attester_slashing(input: openArray[byte], output: ptr byte,
 
   try:
     # TODO flags
-    result = process_attester_slashing(data.state, data.attesterSlashing, cache)
+    flags.incl skipValidation
+    result = process_attester_slashing(data.state, data.attesterSlashing, flags, cache)
   except ValueError as e:
     # TODO remove when status-im/nim-chronicles#60 is resolved
     raise newException(
